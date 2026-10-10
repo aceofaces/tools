@@ -1,0 +1,16 @@
+[project]
+name = "tools"
+version = "0.1.0"
+description = "Small single-page browser tools"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-playwright"]
+
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
