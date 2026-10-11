@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>River Flow</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+:root {
+  --bg: #fff; --fg: #1d1d1f; --muted: #6b6b70; --panel: #f6f6f7; --border: #d6d6dc;
+  --accent: #0b62d6; --on-accent: #fff; --error: #b3261e; --chip-on: #1d1d1f; --on-chip-on: #fff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151517; --fg: #ececef; --muted: #9a9aa2; --panel: #1f1f23; --border: #3a3a42;
+    --accent: #6ea8ff; --on-accent: #0b1a33; --error: #ff8a80; --chip-on: #ececef; --on-chip-on: #151517;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
+h1 { font-size: 1.6rem; margin: 0 0 4px; }
+.lede { color: var(--muted); margin: 0 0 16px; }
+a { color: var(--accent); }
+button, select { font: inherit; font-size: 16px; color: var(--fg); }
+button { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 12px; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+
+/* The map: satellite tiles, with the speed heatmap and particle trails on canvases above */
+#map { position: relative; height: min(75vh, 680px); min-height: 380px; border-radius: 12px;
+  overflow: hidden; background: #0b0f14; }
+.flow-canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 450; }
+.overlay { position: absolute; z-index: 500; pointer-events: none; color: #fff;
+  text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+#legend { top: 12px; left: 12px; right: 60px; max-width: 360px; }
+#legend .title { font-weight: 700; font-size: 1.05rem; line-height: 1.2; }
+#legend .sub { font-size: .8rem; opacity: .85; }
+#legend .bar { position: relative; height: 6px; border-radius: 3px; margin: 8px 2.2em 2px 0; }
+#legend .ticks { position: relative; height: 1.2em; font-size: .75rem; margin-right: 2.2em; }
+#legend .ticks span { position: absolute; transform: translateX(-50%); }
+#legend .ticks span:first-child { transform: none; }
+#legend .unit { position: absolute; right: -2.2em; top: -1.5em; font-size: .75rem; }
+#caption { left: 0; right: 0; bottom: 0; padding: 48px 16px 26px;
+  background: linear-gradient(transparent, rgba(5,8,14,.75)); }
+#caption h2 { margin: 0; font-size: clamp(1.5rem, 5vw, 2.4rem); line-height: 1.1; }
+#caption .sub { font-size: clamp(1rem, 3vw, 1.25rem); margin-top: 2px; }
+#caption .note { font-size: .75rem; opacity: .75; margin-top: 6px; }
+@media (max-width: 560px) { #caption { padding-bottom: 46px; } }
+#busy { left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(5,8,14,.7);
+  padding: 8px 14px; border-radius: 8px; font-size: .9rem; text-shadow: none; }
+#busy[hidden] { display: none; }
+.river-label { color: #fff; font: 700 13px/1 system-ui, sans-serif; letter-spacing: .04em;
+  text-transform: uppercase; text-shadow: 0 1px 3px #000, 0 0 8px #000; white-space: nowrap;
+  transform: translate(-50%, -50%); width: max-content; }
+.leaflet-container { font: inherit; }
+.leaflet-popup-content { margin: 8px 12px; font-size: 14px; }
+
+.nav { display: flex; gap: 8px; align-items: center; margin: 12px 0 8px; }
+.stops { display: flex; gap: 6px; overflow-x: auto; flex: 1; padding: 2px 0;
+  -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+.stops button { white-space: nowrap; flex: none; font-size: .9rem; padding: 4px 10px; border-radius: 999px; }
+.stops button[aria-current="true"] { background: var(--chip-on); color: var(--on-chip-on); border-color: var(--chip-on); }
+#error { color: var(--error); margin: 8px 0; }
+#error:empty { display: none; }
+#details { color: var(--muted); font-size: .875rem; }
+#details p { margin: 4px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>River Flow</h1>
+  <p class="lede">Watch the river move, stop by stop. Tap the water for the modeled speed and depth.</p>
+
+  <div id="map">
+    <div id="legend" class="overlay">
+      <div class="title" id="river-title"></div>
+      <div class="sub">Current speed, modeled from the river's outline and today's gauge reading</div>
+      <div class="bar" id="legend-bar"></div>
+      <div class="ticks" id="legend-ticks"><span class="unit">mph</span></div>
+    </div>
+    <div id="caption" class="overlay">
+      <h2 id="cap-title"></h2>
+      <div class="sub" id="cap-sub"></div>
+      <div class="note">A model, from OpenStreetMap water outlines, estimated depths and USGS river gauges</div>
+    </div>
+    <div id="busy" class="overlay" hidden></div>
+  </div>
+
+  <div class="nav">
+    <button id="prev" aria-label="Previous stop">←</button>
+    <div class="stops" id="stops" role="list"></div>
+    <button id="next" aria-label="Next stop">→</button>
+    <button id="play" aria-label="Pause animation">❚❚</button>
+  </div>
+  <div id="error" role="alert"></div>
+  <div id="details"></div>
+</main>
+
+<script>
+const MPH = 2.23694;           // m/s → mph
+const CFS = 0.0283168;         // ft³/s → m³/s
+const LEGEND_MAX = 10;         // mph at the top of the color scale (square-root scaled)
+const LEGEND_TICKS = [0, 1, 2, 4, 6, 8, 10];
+const GRID_TARGET = 380;       // model cells along the longer side of a stop
+const Z = 14;                  // zoom level whose world pixels the model grid is laid out in
+const TILEJSON = 'https://tiles.openfreemap.org/planet';
+
+// Each stop is a box on the map. Where water crosses the edge of the box, it's an
+// inlet (fed by a gauge's discharge), an outlet (water leaves) or a wall, whichever
+// of those points it's closest to. Inlets only claim their single closest crossing.
+// depth: guessed depth of the main channel (m); shelf: distance from shore (m) to reach it.
+const RIVERS = {
+  mississippi: {
+    title: 'The Mississippi, in Motion',
+    stops: [
+      { id: 'minneapolis', name: 'Minneapolis', title: 'St. Anthony Falls',
+        sub: f => `The only waterfall on the Mississippi · ${cfs(f.total)} cubic feet a second`,
+        bbox: [44.962, -93.282, 45.004, -93.222], depth: 5, shelf: 40,
+        inlets: [{ name: 'Mississippi', at: [45.006, -93.276], site: '05288500', gauge: 'near Anoka, MN', typical: 8000 }],
+        outlets: [[44.958, -93.228]],
+        labels: [{ text: 'St. Anthony Falls', at: [44.9817, -93.2581] }] },
+      { id: 'missouri', name: 'Missouri confluence', title: 'The Missouri Joins',
+        sub: f => `${pct(f.inlets[1].cfs / f.total)} of the river now comes from the Missouri`,
+        bbox: [38.77, -90.20, 38.885, -90.07], depth: 9, shelf: 90,
+        inlets: [
+          { name: 'Mississippi', at: [38.89, -90.16], site: '05587450', gauge: 'at Grafton, IL', typical: 110000 },
+          { name: 'Missouri', at: [38.83, -90.21], site: '06934500', gauge: 'at Hermann, MO', typical: 90000 }],
+        outlets: [[38.765, -90.16]] },
+      { id: 'st-louis', name: 'St. Louis', title: 'St. Louis',
+        sub: f => `${cfs(f.total)} cubic feet every second`,
+        bbox: [38.595, -90.215, 38.66, -90.15], depth: 12, shelf: 100,
+        inlets: [{ name: 'Mississippi', at: [38.665, -90.18], site: '07010000', gauge: 'at St. Louis, MO', typical: 190000 }],
+        outlets: [[38.59, -90.19]],
+        labels: [{ text: 'Gateway Arch', at: [38.6247, -90.1848] }] },
+      { id: 'cairo', name: 'Cairo', title: 'The Ohio Joins',
+        sub: f => `The Ohio brings ${pct(f.inlets[1].cfs / f.total)} of the water at Cairo`,
+        bbox: [36.94, -89.25, 37.06, -89.07], depth: 15, shelf: 150,
+        inlets: [
+          { name: 'Mississippi', at: [37.05, -89.27], site: '07022000', gauge: 'at Thebes, IL', typical: 200000 },
+          { name: 'Ohio', at: [37.07, -89.15], site: '03611500', gauge: 'at Metropolis, IL', typical: 280000 }],
+        outlets: [[36.93, -89.11]] },
+      { id: 'memphis', name: 'Memphis', title: 'Memphis',
+        sub: f => `${cfs(f.total)} cubic feet every second`,
+        bbox: [35.10, -90.13, 35.19, -90.03], depth: 18, shelf: 150,
+        inlets: [{ name: 'Mississippi', at: [35.20, -90.08], site: '07032000', gauge: 'at Memphis, TN', typical: 470000 }],
+        outlets: [[35.09, -90.12]] },
+      { id: 'new-orleans', name: 'New Orleans', title: 'Algiers Point',
+        sub: f => `The river's deepest bend · ${cfs(f.total)} cubic feet a second`,
+        bbox: [29.905, -90.11, 29.975, -90.00], depth: 30, shelf: 120,
+        inlets: [{ name: 'Mississippi', at: [29.92, -90.12], site: '07374000', gauge: 'at Baton Rouge, LA', typical: 450000 }],
+        outlets: [[29.93, -89.99]],
+        walls: [[29.98, -90.03]],
+        labels: [{ text: 'Algiers Point', at: [29.9585, -90.0525] }] },
+      { id: 'head-of-passes', name: 'Head of Passes', title: 'Head of Passes',
+        sub: f => `${cfs(f.total)} cubic feet a second, split three ways into the Gulf`,
+        bbox: [29.07, -89.40, 29.30, -89.10], depth: 15, shelf: 250,
+        inlets: [{ name: 'Mississippi', at: [29.31, -89.37], site: '07374525', gauge: 'at Belle Chasse, LA', typical: 450000 }],
+        outlets: [[29.0, -89.25], [29.15, -89.02], [29.32, -89.08], [29.1, -89.48]] },
+    ],
+  },
+};
+
+const $ = id => document.getElementById(id);
+const cfs = v => (v >= 1000 ? Math.round(v / 1000) * 1000 : Math.round(v)).toLocaleString('en-US');
+const pct = v => Math.round(v * 100) + '%';
+const sleep = () => new Promise(r => setTimeout(r, 0));
+
+// ---- Colors ---------------------------------------------------------------
+const RAMP = [[0, '#16207a'], [.15, '#1f4fd8'], [.3, '#1fa2e0'], [.45, '#20c9a0'], [.58, '#8fd63a'],
+  [.7, '#f5d327'], [.8, '#f89a22'], [.9, '#e8412b'], [1, '#b62ad9']];
+const LUT = (() => {
+  const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let k = 0; while (k < RAMP.length - 2 && t > RAMP[k + 1][0]) k++;
+    const [t0, c0] = RAMP[k], [t1, c1] = RAMP[k + 1];
+    const f = Math.min(1, Math.max(0, (t - t0) / (t1 - t0)));
+    const a = hex(c0), b = hex(c1);
+    for (let j = 0; j < 3; j++) lut[i * 3 + j] = Math.round(a[j] + (b[j] - a[j]) * f);
+  }
+  return lut;
+})();
+const speedT = ms => Math.min(1, Math.sqrt(ms * MPH / LEGEND_MAX));
+
+function drawLegend() {
+  $('legend-bar').style.background = `linear-gradient(to right, ${RAMP.map(([t, c]) => `${c} ${t * 100}%`).join(', ')})`;
+  const ticks = $('legend-ticks');
+  for (const v of LEGEND_TICKS) {
+    const s = document.createElement('span');
+    s.textContent = v;
+    s.style.left = Math.sqrt(v / LEGEND_MAX) * 100 + '%';
+    ticks.insertBefore(s, ticks.querySelector('.unit'));
+  }
+}
+
+// ---- Vector tiles ---------------------------------------------------------
+// A small Mapbox Vector Tile reader: just enough protobuf to pull polygons out of
+// the OpenMapTiles "water" layer.
+class Pbf {
+  constructor(buf, pos = 0, end = buf.length) { this.buf = buf; this.pos = pos; this.end = end; }
+  varint() {
+    let val = 0, shift = 0, b;
+    do { b = this.buf[this.pos++]; val += (b & 0x7f) * 2 ** shift; shift += 7; } while (b & 0x80);
+    return val;
+  }
+  skip(wire) {
+    if (wire === 0) this.varint();
+    else if (wire === 1) this.pos += 8;
+    else if (wire === 2) this.pos += this.varint();
+    else if (wire === 5) this.pos += 4;
+    else throw new Error('Bad protobuf wire type ' + wire);
+  }
+  fields(fn) {
+    while (this.pos < this.end) {
+      const tag = this.varint(), field = tag >> 3, wire = tag & 7;
+      if (wire === 2) {
+        const len = this.varint(), start = this.pos;
+        this.pos += len;
+        if (fn(field, wire, new Pbf(this.buf, start, start + len)) === false) continue;
+      } else if (fn(field, wire, this) === false) this.skip(wire);
+    }
+  }
+  string() { return new TextDecoder().decode(this.buf.subarray(this.pos, this.end)); }
+  packed() { const out = []; while (this.pos < this.end) out.push(this.varint()); return out; }
+}
+
+function decodeLayer(p) {
+  const layer = { name: '', extent: 4096, keys: [], values: [], features: [] };
+  p.fields((f, w, sub) => {
+    if (f === 1 && w === 2) layer.name = sub.string();
+    else if (f === 3 && w === 2) layer.keys.push(sub.string());
+    else if (f === 4 && w === 2) {
+      let v = null;
+      sub.fields((vf, vw, vs) => { if (vf === 1 && vw === 2) v = vs.string(); else return false; });
+      layer.values.push(v);
+    } else if (f === 2 && w === 2) {
+      const feat = { type: 0, tags: [], geometry: [] };
+      sub.fields((ff, fw, fs) => {
+        if (ff === 2 && fw === 2) feat.tags = fs.packed();
+        else if (ff === 4 && fw === 2) feat.geometry = fs.packed();
+        else if (ff === 3 && fw === 0) feat.type = fs.varint();
+        else return false;
+      });
+      layer.features.push(feat);
+    } else if (f === 5 && w === 0) layer.extent = sub.varint();
+    else return false;
+  });
+  return layer;
+}
+
+function decodeTile(buf) {
+  const layers = {};
+  new Pbf(buf).fields((f, w, sub) => {
+    if (f === 3 && w === 2) { const l = decodeLayer(sub); layers[l.name] = l; } else return false;
+  });
+  return layers;
+}
+
+function featureProps(layer, feat) {
+  const props = {};
+  for (let i = 0; i + 1 < feat.tags.length; i += 2) props[layer.keys[feat.tags[i]]] = layer.values[feat.tags[i + 1]];
+  return props;
+}
+
+function tracePolygon(ctx, geom) {
+  let x = 0, y = 0, i = 0;
+  const zz = n => (n >>> 1) ^ -(n & 1);
+  while (i < geom.length) {
+    const cmd = geom[i++], id = cmd & 7, n = cmd >> 3;
+    if (id === 7) { ctx.closePath(); continue; }
+    for (let k = 0; k < n; k++) {
+      x += zz(geom[i++]); y += zz(geom[i++]);
+      if (id === 1) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+  }
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${new URL(url).host} answered ${r.status}`);
+  return r.json();
+}
+
+async function fetchTile(url) {
+  const r = await fetch(url);
+  if (r.status === 404 || r.status === 204) return null;
+  if (!r.ok) throw new Error(`Tile server answered ${r.status}`);
+  let buf = new Uint8Array(await r.arrayBuffer());
+  if (buf[0] === 0x1f && buf[1] === 0x8b) {  // still gzipped (no Content-Encoding header)
+    const s = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+    buf = new Uint8Array(await new Response(s).arrayBuffer());
+  }
+  return buf;
+}
+
+// ---- Model grid -----------------------------------------------------------
+function makeGrid(stop) {
+  const [s, w, n, e] = stop.bbox;
+  const nw = L.CRS.EPSG3857.latLngToPoint(L.latLng(n, w), Z);
+  const se = L.CRS.EPSG3857.latLngToPoint(L.latLng(s, e), Z);
+  const cs = Math.max(se.x - nw.x, se.y - nw.y) / GRID_TARGET;   // cell size in zoom-14 pixels
+  const W = Math.ceil((se.x - nw.x) / cs), H = Math.ceil((se.y - nw.y) / cs);
+  const lat = (s + n) / 2;
+  const cellM = cs * 156543.034 * Math.cos(lat * Math.PI / 180) / 2 ** Z;
+  return { ox: nw.x, oy: nw.y, cs, W, H, cellM,
+    toGrid: ll => { const p = L.CRS.EPSG3857.latLngToPoint(L.latLng(ll), Z); return [(p.x - nw.x) / cs, (p.y - nw.y) / cs]; },
+    nwLatLng: L.CRS.EPSG3857.pointToLatLng(nw, Z) };
+}
+
+async function loadWaterMask(grid, progress) {
+  const tj = await fetchJSON(TILEJSON);
+  const template = tj.tiles && tj.tiles[0];
+  if (!template) throw new Error('The tile server sent no tile URL');
+  // Highest tile zoom (≤ 14) that covers the box in at most 40 tiles
+  let tz = Math.min(14, tj.maxzoom || 14), x0, x1, y0, y1;
+  for (; tz > 0; tz--) {
+    const f = 256 * 2 ** (Z - tz);
+    x0 = Math.floor(grid.ox / f); x1 = Math.floor((grid.ox + grid.W * grid.cs) / f);
+    y0 = Math.floor(grid.oy / f); y1 = Math.floor((grid.oy + grid.H * grid.cs) / f);
+    if ((x1 - x0 + 1) * (y1 - y0 + 1) <= 40) break;
+  }
+  const jobs = [];
+  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) jobs.push({ x, y });
+  let done = 0;
+  const tiles = await Promise.all(jobs.map(async j => {
+    const buf = await fetchTile(template.replace('{z}', tz).replace('{x}', j.x).replace('{y}', j.y));
+    progress(`Loading water outlines… ${++done}/${jobs.length}`);
+    return { ...j, buf };
+  }));
+  const canvas = document.createElement('canvas');
+  canvas.width = grid.W; canvas.height = grid.H;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  const tileSize = 256 * 2 ** (Z - tz);
+  let polygons = 0;
+  for (const t of tiles) {
+    if (!t.buf) continue;
+    const water = decodeTile(t.buf).water;
+    if (!water) continue;
+    const s = tileSize / water.extent / grid.cs;
+    ctx.setTransform(s, 0, 0, s, (t.x * tileSize - grid.ox) / grid.cs, (t.y * tileSize - grid.oy) / grid.cs);
+    for (const feat of water.features) {
+      if (feat.type !== 3 || featureProps(water, feat).class === 'swimming_pool') continue;
+      ctx.beginPath(); tracePolygon(ctx, feat.geometry); ctx.fill('evenodd');
+      polygons++;
+    }
+  }
+  if (!polygons) throw new Error('No water found in the map tiles for this stop');
+  const px = ctx.getImageData(0, 0, grid.W, grid.H).data;
+  const mask = new Uint8Array(grid.W * grid.H);
+  for (let i = 0; i < mask.length; i++) mask[i] = px[i * 4 + 3] >= 128 ? 1 : 0;
+  return mask;
+}
+
+// ---- Gauges ---------------------------------------------------------------
+async function fetchGauge(site) {
+  try {
+    const j = await fetchJSON(`https://api.waterdata.usgs.gov/ogcapi/v0/collections/latest-continuous/items?f=json&monitoring_location_id=USGS-${site}&parameter_code=00060`);
+    for (const f of j.features || []) {
+      const v = parseFloat(f.properties.value);
+      if (v > 0) return { cfs: v, time: f.properties.time };
+    }
+  } catch (e) { /* fall through to the older service */ }
+  try {
+    const j = await fetchJSON(`https://waterservices.usgs.gov/nwis/iv/?format=json&sites=${site}&parameterCd=00060&siteStatus=all`);
+    for (const ts of j.value.timeSeries) for (const vs of ts.values) {
+      const last = vs.value[vs.value.length - 1];
+      if (last && parseFloat(last.value) > 0) return { cfs: parseFloat(last.value), time: last.dateTime };
+    }
+  } catch (e) { /* use the typical flow */ }
+  return null;
+}
+
+async function loadFlows(stop) {
+  const inlets = await Promise.all(stop.inlets.map(async inlet => {
+    const g = await fetchGauge(inlet.site);
+    return { ...inlet, cfs: g ? g.cfs : inlet.typical, time: g && g.time, live: !!g };
+  }));
+  return { inlets, total: inlets.reduce((a, i) => a + i.cfs, 0) };
+}
+
+// ---- Flow model -----------------------------------------------------------
+// Steady, depth-averaged flow where friction balances the water-surface slope
+// (Manning): unit discharge q = -K ∇η with K ∝ h^(5/3), and ∇·q = 0. Gauged
+// discharge enters at the inlets, the surface is held level at the outlets, and
+// banks are walls. Depth h is guessed from distance to shore.
+async function solveFlow(stop, grid, water, flows, progress) {
+  const { W, H } = grid, N = W * H;
+  const at = (x, y) => y * W + x;
+
+  // Water cells around the edge of the box, in order, split into contiguous runs
+  const perim = [];
+  for (let x = 0; x < W; x++) perim.push([x, 0, 0]);
+  for (let y = 1; y < H; y++) perim.push([W - 1, y, 1]);
+  for (let x = W - 2; x >= 0; x--) perim.push([x, H - 1, 2]);
+  for (let y = H - 2; y > 0; y--) perim.push([0, y, 3]);
+  const runs = [];
+  let run = null;
+  for (const [x, y, side] of perim) {
+    if (water[at(x, y)]) { if (!run) runs.push(run = []); run.push({ i: at(x, y), x, y, side }); } else run = null;
+  }
+  const points = [
+    ...stop.inlets.map((p, k) => ({ kind: 'in', k, g: grid.toGrid(p.at) })),
+    ...(stop.outlets || []).map(p => ({ kind: 'out', g: grid.toGrid(p) })),
+    ...(stop.walls || []).map(p => ({ kind: 'wall', g: grid.toGrid(p) })),
+  ];
+  const inletRun = stop.inlets.map(() => null);
+  const outletRuns = [];
+  for (const r of runs) {
+    let best = null, bestD = Infinity;
+    for (const p of points) for (const c of r) {
+      const d = (c.x - p.g[0]) ** 2 + (c.y - p.g[1]) ** 2;
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    r.d = bestD;
+    if (best.kind === 'out') outletRuns.push(r);
+    else if (best.kind === 'in' && (!inletRun[best.k] || r.d < inletRun[best.k].d)) inletRun[best.k] = r;
+  }
+  stop.inlets.forEach((p, k) => {
+    if (!inletRun[k]) throw new Error(`Couldn't find where the ${p.name} enters the map`);
+  });
+  if (!outletRuns.length) throw new Error('Couldn\'t find where the river leaves the map');
+
+  // Keep only water connected to an inlet
+  const active = new Uint8Array(N);
+  const stack = [];
+  for (const r of inletRun) for (const c of r) { active[c.i] = 1; stack.push(c.i); }
+  while (stack.length) {
+    const i = stack.pop(), x = i % W, y = (i - x) / W;
+    for (const [nx, ny] of [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]) {
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      const j = at(nx, ny);
+      if (water[j] && !active[j]) { active[j] = 1; stack.push(j); }
+    }
+  }
+  const fixed = new Uint8Array(N);      // outlet cells, η = 0
+  const borderSide = new Int8Array(N).fill(-1);
+  for (const r of outletRuns) for (const c of r) if (active[c.i]) { fixed[c.i] = 1; borderSide[c.i] = c.side; }
+  if (!fixed.some(v => v)) throw new Error('The water here doesn\'t connect from inlet to outlet in the map data');
+
+  // Depth from distance to shore (two-pass chamfer distance transform)
+  const dist = new Float32Array(N);
+  for (let i = 0; i < N; i++) dist[i] = water[i] ? 1e9 : 0;
+  const D = Math.SQRT2;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = at(x, y); if (!dist[i]) continue;
+    let d = dist[i];
+    if (x > 0) d = Math.min(d, dist[i - 1] + 1);
+    if (y > 0) { d = Math.min(d, dist[i - W] + 1); if (x > 0) d = Math.min(d, dist[i - W - 1] + D); if (x < W - 1) d = Math.min(d, dist[i - W + 1] + D); }
+    dist[i] = d;
+  }
+  for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
+    const i = at(x, y); if (!dist[i]) continue;
+    let d = dist[i];
+    if (x < W - 1) d = Math.min(d, dist[i + 1] + 1);
+    if (y < H - 1) { d = Math.min(d, dist[i + W] + 1); if (x < W - 1) d = Math.min(d, dist[i + W + 1] + D); if (x > 0) d = Math.min(d, dist[i + W - 1] + D); }
+    dist[i] = d;
+  }
+  const depth = new Float32Array(N), K = new Float32Array(N);
+  for (let i = 0; i < N; i++) if (active[i]) {
+    const dm = Math.min(dist[i], 1e6) * grid.cellM;
+    depth[i] = Math.max(0.5, stop.depth * Math.min(1, dm / stop.shelf) ** 0.6);
+    K[i] = depth[i] ** (5 / 3);
+  }
+
+  // Sources: each inlet's discharge (m³/s), shared across its edge cells by conveyance
+  const source = new Float32Array(N);
+  flows.inlets.forEach((f, k) => {
+    const cells = inletRun[k].filter(c => active[c.i]);
+    const sumK = cells.reduce((a, c) => a + K[c.i], 0);
+    for (const c of cells) { source[c.i] += f.cfs * CFS * K[c.i] / sumK; borderSide[c.i] = c.side; }
+  });
+
+  // Unknowns and the 5-point operator
+  const idx = new Int32Array(N).fill(-1);
+  const cells = [];
+  for (let i = 0; i < N; i++) if (active[i] && !fixed[i]) { idx[i] = cells.length; cells.push(i); }
+  const n = cells.length;
+  const nb = new Int32Array(n * 4).fill(-1), kf = new Float32Array(n * 4), diag = new Float64Array(n), b = new Float64Array(n);
+  const faceK = (i, j) => 2 * K[i] * K[j] / (K[i] + K[j]);
+  const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (let u = 0; u < n; u++) {
+    const i = cells[u], x = i % W, y = (i - x) / W;
+    DIRS.forEach(([dx, dy], d) => {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) return;
+      const j = at(nx, ny);
+      if (!active[j]) return;
+      const k = faceK(i, j);
+      diag[u] += k;
+      if (!fixed[j]) { nb[u * 4 + d] = idx[j]; kf[u * 4 + d] = k; }
+    });
+    b[u] = source[i];
+  }
+
+  // Jacobi-preconditioned conjugate gradients, in slices so the page stays responsive
+  const eta = new Float64Array(n), r = Float64Array.from(b), z = new Float64Array(n), p = new Float64Array(n), Ap = new Float64Array(n);
+  for (let u = 0; u < n; u++) { z[u] = r[u] / diag[u]; p[u] = z[u]; }
+  let rz = 0, bnorm = 0;
+  for (let u = 0; u < n; u++) { rz += r[u] * z[u]; bnorm += b[u] * b[u]; }
+  bnorm = Math.sqrt(bnorm);
+  const MAX_IT = 40000, TOL = 1e-8;
+  let it = 0, rel = 1, sliceStart = performance.now();
+  for (; it < MAX_IT; it++) {
+    for (let u = 0; u < n; u++) {
+      let s = diag[u] * p[u];
+      for (let d = 0; d < 4; d++) { const v = nb[u * 4 + d]; if (v >= 0) s -= kf[u * 4 + d] * p[v]; }
+      Ap[u] = s;
+    }
+    let pAp = 0;
+    for (let u = 0; u < n; u++) pAp += p[u] * Ap[u];
+    const alpha = rz / pAp;
+    let rr = 0;
+    for (let u = 0; u < n; u++) { eta[u] += alpha * p[u]; r[u] -= alpha * Ap[u]; rr += r[u] * r[u]; }
+    rel = Math.sqrt(rr) / bnorm;
+    if (rel < TOL) break;
+    let rzNew = 0;
+    for (let u = 0; u < n; u++) { z[u] = r[u] / diag[u]; rzNew += r[u] * z[u]; }
+    const beta = rzNew / rz; rz = rzNew;
+    for (let u = 0; u < n; u++) p[u] = z[u] + beta * p[u];
+    if (performance.now() - sliceStart > 30) {
+      progress(`Modeling the flow… ${Math.min(99, Math.round(100 * Math.log(rel) / Math.log(TOL)))}%`);
+      await sleep(); sliceStart = performance.now();
+    }
+  }
+
+  // Face fluxes → velocity at each cell (m/s, x east, y south)
+  const level = new Float64Array(N);
+  for (let u = 0; u < n; u++) level[cells[u]] = eta[u];
+  const u = new Float32Array(N), v = new Float32Array(N), speed = new Float32Array(N);
+  let outflow = 0;
+  for (let i = 0; i < N; i++) if (active[i]) {
+    const x = i % W, y = (i - x) / W;
+    const out = [0, 0, 0, 0];   // flux leaving through the east, west, south, north faces
+    let net = 0;
+    DIRS.forEach(([dx, dy], d) => {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) return;
+      const j = at(nx, ny);
+      if (!active[j]) return;
+      out[d] = faceK(i, j) * (level[i] - level[j]);
+      net += out[d];
+    });
+    if (borderSide[i] >= 0) {
+      // The edge face carries whatever balances the interior faces: the inlet's
+      // source coming in, or the outlet's discharge going out
+      const d = [3, 0, 2, 1][borderSide[i]];     // top, right, bottom, left edge → face
+      out[d] = -net;
+      if (fixed[i]) outflow -= net;
+    }
+    const qx = (out[0] - out[1]) / 2 / grid.cellM, qy = (out[2] - out[3]) / 2 / grid.cellM;
+    u[i] = qx / depth[i]; v[i] = qy / depth[i];
+    speed[i] = Math.hypot(u[i], v[i]);
+  }
+  const speeds = [];
+  for (let i = 0; i < N; i++) if (active[i]) speeds.push(speed[i]);
+  speeds.sort((a, c) => a - c);
+
+  return { grid, active, depth, u, v, speed, it, rel, cellsN: speeds.length, inletRun, flows,
+    inflow: flows.total * CFS, outflow,
+    p95: speeds[Math.floor(speeds.length * 0.95)] || 0, max: speeds[speeds.length - 1] || 0 };
+}
+
+function heatImage(model) {
+  const { W, H } = model.grid;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(W, H);
+  for (let i = 0; i < W * H; i++) if (model.active[i]) {
+    const k = Math.round(speedT(model.speed[i]) * 255) * 3;
+    img.data[i * 4] = LUT[k]; img.data[i * 4 + 1] = LUT[k + 1]; img.data[i * 4 + 2] = LUT[k + 2];
+    img.data[i * 4 + 3] = 215;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+const modelCache = new Map();
+function getModel(stop, progress) {
+  if (!modelCache.has(stop.id)) {
+    const p = (async () => {
+      const grid = makeGrid(stop);
+      const [water, flows] = await Promise.all([loadWaterMask(grid, progress), loadFlows(stop)]);
+      const model = await solveFlow(stop, grid, water, flows, progress);
+      model.heat = heatImage(model);
+      model.spawn = [];
+      for (let i = 0; i < model.active.length; i++) if (model.active[i]) model.spawn.push(i);
+      // Time-lapse so typical fast water crosses about a third of a cell per frame
+      model.timelapse = model.p95 > 0 ? (0.35 * grid.cellM * 60) / model.p95 : 600;
+      return model;
+    })();
+    p.catch(() => modelCache.delete(stop.id));
+    modelCache.set(stop.id, p);
+  }
+  return modelCache.get(stop.id);
+}
+
+// ---- Map and animation ----------------------------------------------------
+const map = L.map('map', { zoomControl: true, attributionControl: true, zoomSnap: 0.25 });
+map.attributionControl.setPrefix(false);
+map.zoomControl.setPosition('topright');
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  maxZoom: 19, maxNativeZoom: 18,
+  attribution: 'Imagery <a href="https://www.esri.com">Esri</a>, Maxar · Water © <a href="https://www.openstreetmap.org/copyright">OSM</a>, <a href="https://openfreemap.org">OpenFreeMap</a> · <a href="https://waterdata.usgs.gov">USGS</a>',
+}).addTo(map);
+const labelLayer = L.layerGroup().addTo(map);
+
+const heatCanvas = document.createElement('canvas'), trailCanvas = document.createElement('canvas');
+for (const c of [heatCanvas, trailCanvas]) { c.className = 'flow-canvas'; map.getContainer().appendChild(c); }
+const heatCtx = heatCanvas.getContext('2d'), trailCtx = trailCanvas.getContext('2d');
+let dpr = 1, cw = 0, ch = 0;
+
+const state = { river: null, stop: null, model: null, playing: true, hidden: false, particles: null, last: 0 };
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  cw = map.getContainer().clientWidth; ch = map.getContainer().clientHeight;
+  for (const c of [heatCanvas, trailCanvas]) { c.width = Math.round(cw * dpr); c.height = Math.round(ch * dpr); }
+  redraw();
+}
+new ResizeObserver(() => { map.invalidateSize(); resize(); }).observe(map.getContainer());
+
+function view() {
+  const m = state.model;
+  const a = map.latLngToContainerPoint(m.grid.nwLatLng);
+  return { ax: a.x, ay: a.y, k: m.grid.cs * 2 ** (map.getZoom() - Z) };
+}
+
+function redraw() {
+  heatCtx.setTransform(1, 0, 0, 1, 0, 0);
+  heatCtx.clearRect(0, 0, heatCanvas.width, heatCanvas.height);
+  trailCtx.setTransform(1, 0, 0, 1, 0, 0);
+  trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
+  if (!state.model || state.hidden) return;
+  const { ax, ay, k } = view(), g = state.model.grid;
+  heatCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  heatCtx.imageSmoothingEnabled = true;
+  heatCtx.globalAlpha = 0.8;
+  heatCtx.drawImage(state.model.heat, ax, ay, g.W * k, g.H * k);
+}
+map.on('move', redraw);
+map.on('zoomstart', () => { state.hidden = true; redraw(); });
+map.on('zoomend', () => { state.hidden = false; redraw(); });
+
+function spawn(m, P, j) {
+  const i = m.spawn[(Math.random() * m.spawn.length) | 0], x = i % m.grid.W;
+  P.x[j] = x + Math.random(); P.y[j] = (i - x) / m.grid.W + Math.random();
+  P.age[j] = (Math.random() * 120) | 0;
+}
+
+function initParticles(m) {
+  const n = Math.max(800, Math.min(7000, Math.round(m.cellsN * 0.12)));
+  const P = { n, x: new Float32Array(n), y: new Float32Array(n), age: new Int16Array(n) };
+  for (let j = 0; j < n; j++) spawn(m, P, j);
+  state.particles = P;
+}
+
+function sample(m, x, y) {
+  const { W, H } = m.grid;
+  const ci = Math.floor(x), cj = Math.floor(y);
+  if (ci < 0 || cj < 0 || ci >= W || cj >= H || !m.active[cj * W + ci]) return null;
+  const fx = x - 0.5, fy = y - 0.5;
+  const x0 = Math.max(0, Math.min(W - 2, Math.floor(fx))), y0 = Math.max(0, Math.min(H - 2, Math.floor(fy)));
+  const tx = Math.min(1, Math.max(0, fx - x0)), ty = Math.min(1, Math.max(0, fy - y0));
+  const i00 = y0 * W + x0, w = [(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty], ids = [i00, i00 + 1, i00 + W, i00 + W + 1];
+  let u = 0, v = 0, ws = 0;
+  for (let q = 0; q < 4; q++) if (m.active[ids[q]]) { u += m.u[ids[q]] * w[q]; v += m.v[ids[q]] * w[q]; ws += w[q]; }
+  return ws ? [u / ws, v / ws] : null;
+}
+
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - state.last) / 1000 || 0); state.last = t;
+  const m = state.model, P = state.particles;
+  if (!m || !P || state.hidden || !state.playing) return;
+  const { ax, ay, k } = view();
+  trailCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  trailCtx.globalCompositeOperation = 'destination-out';
+  trailCtx.fillStyle = 'rgba(0,0,0,0.08)';
+  trailCtx.fillRect(0, 0, cw, ch);
+  trailCtx.globalCompositeOperation = 'source-over';
+  trailCtx.strokeStyle = 'rgba(255,255,255,0.85)';
+  trailCtx.lineWidth = 1.1;
+  trailCtx.beginPath();
+  const f = m.timelapse * dt / m.grid.cellM;
+  for (let j = 0; j < P.n; j++) {
+    const vel = sample(m, P.x[j], P.y[j]);
+    if (!vel || --P.age[j] < 0) { spawn(m, P, j); continue; }
+    const nx = P.x[j] + vel[0] * f, ny = P.y[j] + vel[1] * f;
+    trailCtx.moveTo(ax + P.x[j] * k, ay + P.y[j] * k);
+    trailCtx.lineTo(ax + nx * k, ay + ny * k);
+    P.x[j] = nx; P.y[j] = ny;
+  }
+  trailCtx.stroke();
+}
+requestAnimationFrame(frame);
+
+map.on('click', e => {
+  const m = state.model; if (!m) return;
+  const [gx, gy] = m.grid.toGrid(e.latlng);
+  const x = Math.floor(gx), y = Math.floor(gy);
+  if (x < 0 || y < 0 || x >= m.grid.W || y >= m.grid.H) return;
+  const i = y * m.grid.W + x;
+  if (!m.active[i]) return;
+  const ft = m.depth[i] * 3.28084;
+  L.popup().setLatLng(e.latlng)
+    .setContent(`<b>${(m.speed[i] * MPH).toFixed(1)} mph</b><br>about ${Math.round(ft)} ft deep (estimated)`)
+    .openOn(map);
+});
+
+// ---- Stops, captions, URL ---------------------------------------------------
+function busy(text) { $('busy').hidden = !text; $('busy').textContent = text || ''; }
+
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const river = RIVERS[p.get('river')] ? p.get('river') : 'mississippi';
+  const stops = RIVERS[river].stops;
+  return { river, stop: stops.find(s => s.id === p.get('stop')) || stops[0] };
+}
+
+function renderStops() {
+  const box = $('stops'); box.innerHTML = '';
+  for (const s of RIVERS[state.river].stops) {
+    const b = document.createElement('button');
+    b.textContent = s.name; b.setAttribute('role', 'listitem');
+    b.setAttribute('aria-current', String(s === state.stop));
+    b.onclick = () => go(s);
+    box.appendChild(b);
+    if (s === state.stop) b.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }
+  const stops = RIVERS[state.river].stops, i = stops.indexOf(state.stop);
+  $('prev').disabled = i === 0; $('next').disabled = i === stops.length - 1;
+}
+
+function go(stop) {
+  history.replaceState(null, '', `#river=${state.river}&stop=${stop.id}`);
+  show(stop);
+}
+
+async function show(stop) {
+  state.stop = stop; state.model = null; state.particles = null;
+  redraw(); labelLayer.clearLayers(); map.closePopup();
+  $('error').textContent = ''; $('details').innerHTML = '';
+  $('river-title').textContent = RIVERS[state.river].title;
+  $('cap-title').textContent = stop.title; $('cap-sub').textContent = '';
+  renderStops();
+  const [s, w, n, e] = stop.bbox;
+  map.fitBounds([[s, w], [n, e]], { animate: false });
+  busy('Loading…');
+  try {
+    const m = await getModel(stop, msg => { if (state.stop === stop) busy(msg); });
+    if (state.stop !== stop) return;
+    state.model = m;
+    initParticles(m);
+    redraw();
+    $('cap-sub').textContent = stop.sub(m.flows);
+    for (const l of stop.labels || []) addLabel(l.at, l.text);
+    if (stop.inlets.length > 1) m.inletRun.forEach((r, k) => addLabel(inletLabelAt(m, r), stop.inlets[k].name));
+    renderDetails(stop, m);
+  } catch (err) {
+    if (state.stop !== stop) return;
+    console.error(err);
+    $('error').textContent = `Couldn't model ${stop.title}: ${err.message}`;
+  } finally {
+    if (state.stop === stop) busy('');
+  }
+}
+
+function addLabel(at, text) {
+  const el = document.createElement('div'); el.className = 'river-label'; el.textContent = text;
+  L.marker(at, { icon: L.divIcon({ html: el, className: '', iconSize: null }), interactive: false }).addTo(labelLayer);
+}
+
+// Put an inlet's name a little way into the map from where it crosses the edge
+function inletLabelAt(m, run) {
+  const { W, H, cs } = m.grid, c = run[Math.floor(run.length / 2)];
+  const [dx, dy] = [[0, 1], [-1, 0], [0, -1], [1, 0]][c.side];
+  let x = c.x, y = c.y;
+  const steps = Math.round(Math.min(W, H) * 0.12);
+  for (let s = 0; s < steps; s++) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= W || ny >= H || !m.active[ny * W + nx]) break;
+    x = nx; y = ny;
+  }
+  return L.CRS.EPSG3857.pointToLatLng(L.point(m.grid.ox + (x + 0.5) * cs, m.grid.oy + (y + 0.5) * cs), Z);
+}
+
+function renderDetails(stop, m) {
+  const fmtTime = t => t ? new Date(t).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  const gauges = m.flows.inlets.map(f => {
+    const link = `<a href="https://waterdata.usgs.gov/monitoring-location/USGS-${f.site}/" target="_blank" rel="noopener">${f.name} ${f.gauge}</a>`;
+    return f.live ? `${link}: ${cfs(f.cfs)} ft³/s at ${fmtTime(f.time)}`
+      : `${link}: gauge unavailable, using a typical ${cfs(f.cfs)} ft³/s`;
+  });
+  const minutes = m.timelapse / 60;
+  const lapse = minutes >= 1 ? `1 second here is about ${Math.round(minutes)} minutes of river` : `1 second here is about ${Math.round(m.timelapse)} seconds of river`;
+  const balance = Math.abs(m.outflow - m.inflow) / m.inflow;
+  $('details').innerHTML = `<p>${gauges.join('<br>')}</p>
+    <p>Modeled top speed ${(m.max * MPH).toFixed(1)} mph · ${lapse} · ${m.grid.W}×${m.grid.H} grid at ${Math.round(m.grid.cellM)} m${balance > 0.02 ? ` · solver off by ${pct(balance)}` : ''}</p>`;
+}
+
+$('prev').onclick = () => { const s = RIVERS[state.river].stops; go(s[Math.max(0, s.indexOf(state.stop) - 1)]); };
+$('next').onclick = () => { const s = RIVERS[state.river].stops; go(s[Math.min(s.length - 1, s.indexOf(state.stop) + 1)]); };
+$('play').onclick = () => {
+  state.playing = !state.playing;
+  $('play').textContent = state.playing ? '❚❚' : '▶';
+  $('play').setAttribute('aria-label', state.playing ? 'Pause animation' : 'Play animation');
+};
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input, select, textarea')) return;
+  if (e.key === 'ArrowLeft' && !$('prev').disabled) $('prev').click();
+  if (e.key === 'ArrowRight' && !$('next').disabled) $('next').click();
+});
+window.addEventListener('hashchange', () => { const h = readHash(); state.river = h.river; if (h.stop !== state.stop) show(h.stop); });
+
+window.riverFlow = { state, getModel, RIVERS };
+drawLegend();
+{ const h = readHash(); state.river = h.river; resize(); show(h.stop); }
+</script>
+</body>
+</html>
