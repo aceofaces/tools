@@ -52,6 +52,24 @@ def feature(value_index, rings):
     )
 
 
+def line(points):
+    geom, x, y = [1 | 1 << 3], 0, 0
+    for k, (px, py) in enumerate(points):
+        if k == 1:
+            geom.append(2 | (len(points) - 1) << 3)
+        geom += [zigzag(px - x), zigzag(py - y)]
+        x, y = px, py
+    return geom
+
+
+def line_feature(tags, points):
+    return (
+        field(2, 2, b"".join(varint(t) for t in tags))
+        + field(3, 0, 2)
+        + field(4, 2, b"".join(varint(g) for g in line(points)))
+    )
+
+
 def water_tile():
     # A river band across the tile with a square island in it (a hole, counterclockwise),
     # crossed by a band running down the tile, so tiles join up into a lattice of channels
@@ -73,7 +91,21 @@ def water_tile():
         + field(4, 2, field(1, 2, b"swimming_pool"))
         + field(5, 0, 4096)
     )
-    return field(3, 2, layer)
+    # Centerlines, drawn downstream: the "Mississippi River" flows east along the band,
+    # an ungauged river flows south down the cross band
+    waterway = (
+        field(15, 0, 2)
+        + field(1, 2, b"waterway")
+        + field(2, 2, line_feature([0, 0, 1, 1], [(-64, 2050), (4160, 2050)]))
+        + field(2, 2, line_feature([0, 0, 1, 2], [(2050, -64), (2050, 4160)]))
+        + field(3, 2, b"class")
+        + field(3, 2, b"name")
+        + field(4, 2, field(1, 2, b"river"))
+        + field(4, 2, field(1, 2, b"Mississippi River"))
+        + field(4, 2, field(1, 2, b"Nameless Bayou"))
+        + field(5, 0, 4096)
+    )
+    return field(3, 2, layer) + field(3, 2, waterway)
 
 
 def usgs_ok(route):
@@ -96,11 +128,12 @@ def river(page):
 
 
 def model(page):
-    return page.evaluate("""async () => {
-        const m = await riverFlow.getModel(riverFlow.state.stop, () => {});
+    return page.evaluate("""() => {
+        const m = riverFlow.state.model;
         let active = 0; for (const a of m.active) active += a;
         return { inflow: m.inflow, outflow: m.outflow, max: m.max, p95: m.p95,
-                 active, cells: m.grid.W * m.grid.H, rel: m.rel };
+                 active, cells: m.grid.W * m.grid.H, rel: m.rel, bbox: m.grid.bbox,
+                 inlets: m.inlets.map(g => g.gauge.site) };
     }""")
 
 
@@ -150,3 +183,31 @@ def test_navigation_updates_hash(river, server):
     expect(river.locator("#cap-title")).to_have_text("The Missouri Joins")
     assert river.url.endswith("#river=mississippi&stop=missouri")
     expect(river.locator(".stops button[aria-current=true]")).to_have_text("Missouri confluence")
+
+
+def test_model_follows_the_map(river, server):
+    river.goto(f"{server}/river-flow.html#stop=memphis")
+    expect(river.locator("#busy")).to_be_hidden()
+    first = model(river)
+    assert first["inlets"] and set(first["inlets"]) == {"07032000"}
+    # Pan well past the modeled area: a new model covers the new view
+    river.evaluate("riverFlow.map.panBy([2000, 1500], { animate: false })")
+    river.wait_for_function("""() => {
+        const m = riverFlow.state.model, b = riverFlow.map.getBounds(), [s, w, n, e] = m.grid.bbox;
+        return b.getSouth() >= s && b.getWest() >= w && b.getNorth() <= n && b.getEast() <= e;
+    }""")
+    expect(river.locator("#busy")).to_be_hidden()
+    expect(river.locator("#error")).to_be_empty()
+    m = model(river)
+    assert m["bbox"] != first["bbox"]
+    assert m["outflow"] == pytest.approx(m["inflow"], rel=0.01)
+
+
+def test_zoomed_out_too_far_keeps_the_model(river, server):
+    river.goto(f"{server}/river-flow.html#stop=st-louis")
+    expect(river.locator("#busy")).to_be_hidden()
+    first = model(river)
+    river.evaluate("riverFlow.map.setZoom(7, { animate: false })")
+    expect(river.locator("#busy")).to_have_text("Zoom in to model the flow here")
+    assert model(river)["bbox"] == first["bbox"]
+    expect(river.locator("#error")).to_be_empty()

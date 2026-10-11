@@ -105,13 +105,19 @@ const MPH = 2.23694;           // m/s → mph
 const CFS = 0.0283168;         // ft³/s → m³/s
 const LEGEND_MAX = 10;         // mph at the top of the color scale (square-root scaled)
 const LEGEND_TICKS = [0, 1, 2, 4, 6, 8, 10];
-const GRID_TARGET = 380;       // model cells along the longer side of a stop
+const GRID_TARGET = 460;       // model cells along the longer side of the modeled area
 const Z = 14;                  // zoom level whose world pixels the model grid is laid out in
 const TILEJSON = 'https://tiles.openfreemap.org/planet';
 
-// Each stop is a box on the map. Where water crosses the edge of the box, it's an
-// inlet (fed by a gauge's discharge), an outlet (water leaves) or a wall, whichever
-// of those points it's closest to. Inlets only claim their single closest crossing.
+const VIEW_PAD = 0.2;          // model this much beyond each side of the visible map
+const MAX_SPAN_KM = 90;        // don't model views wider than this; rivers get too thin
+const MAX_CELL_PX = 4;         // re-model when zooming in makes cells bigger than this on screen
+
+// Each stop is where the map opens (bbox). The model covers whatever is in view: a
+// river crossing the edge of it is an inlet when OpenStreetMap's centerline (drawn
+// downstream) flows in and its name matches a gauge, an outlet when it flows out,
+// and a wall otherwise. An inlet takes its discharge from the nearest gauge of that
+// name; `at` is roughly where that gauge's water enters the stop.
 // depth: guessed depth of the main channel (m); shelf: distance from shore (m) to reach it.
 const RIVERS = {
   mississippi: {
@@ -121,45 +127,37 @@ const RIVERS = {
         sub: f => `The only waterfall on the Mississippi · ${cfs(f.total)} cubic feet a second`,
         bbox: [44.962, -93.282, 45.004, -93.222], depth: 5, shelf: 40,
         inlets: [{ name: 'Mississippi', at: [45.006, -93.276], site: '05288500', gauge: 'near Anoka, MN', typical: 8000 }],
-        outlets: [[44.958, -93.228]],
         labels: [{ text: 'St. Anthony Falls', at: [44.9817, -93.2581] }] },
       { id: 'missouri', name: 'Missouri confluence', title: 'The Missouri Joins',
         sub: f => `${pct(f.inlets[1].cfs / f.total)} of the river now comes from the Missouri`,
         bbox: [38.77, -90.20, 38.885, -90.07], depth: 9, shelf: 90,
         inlets: [
           { name: 'Mississippi', at: [38.89, -90.16], site: '05587450', gauge: 'at Grafton, IL', typical: 110000 },
-          { name: 'Missouri', at: [38.83, -90.21], site: '06934500', gauge: 'at Hermann, MO', typical: 90000 }],
-        outlets: [[38.765, -90.16]] },
+          { name: 'Missouri', at: [38.83, -90.21], site: '06934500', gauge: 'at Hermann, MO', typical: 90000 }] },
       { id: 'st-louis', name: 'St. Louis', title: 'St. Louis',
         sub: f => `${cfs(f.total)} cubic feet every second`,
         bbox: [38.595, -90.215, 38.66, -90.15], depth: 12, shelf: 100,
         inlets: [{ name: 'Mississippi', at: [38.665, -90.18], site: '07010000', gauge: 'at St. Louis, MO', typical: 190000 }],
-        outlets: [[38.59, -90.19]],
         labels: [{ text: 'Gateway Arch', at: [38.6247, -90.1848] }] },
       { id: 'cairo', name: 'Cairo', title: 'The Ohio Joins',
         sub: f => `The Ohio brings ${pct(f.inlets[1].cfs / f.total)} of the water at Cairo`,
         bbox: [36.94, -89.25, 37.06, -89.07], depth: 15, shelf: 150,
         inlets: [
           { name: 'Mississippi', at: [37.05, -89.27], site: '07022000', gauge: 'at Thebes, IL', typical: 200000 },
-          { name: 'Ohio', at: [37.07, -89.15], site: '03611500', gauge: 'at Metropolis, IL', typical: 280000 }],
-        outlets: [[36.93, -89.11]] },
+          { name: 'Ohio', at: [37.07, -89.15], site: '03611500', gauge: 'at Metropolis, IL', typical: 280000 }] },
       { id: 'memphis', name: 'Memphis', title: 'Memphis',
         sub: f => `${cfs(f.total)} cubic feet every second`,
         bbox: [35.10, -90.13, 35.19, -90.03], depth: 18, shelf: 150,
-        inlets: [{ name: 'Mississippi', at: [35.20, -90.08], site: '07032000', gauge: 'at Memphis, TN', typical: 470000 }],
-        outlets: [[35.09, -90.12]] },
+        inlets: [{ name: 'Mississippi', at: [35.20, -90.08], site: '07032000', gauge: 'at Memphis, TN', typical: 470000 }] },
       { id: 'new-orleans', name: 'New Orleans', title: 'Algiers Point',
         sub: f => `The river's deepest bend · ${cfs(f.total)} cubic feet a second`,
         bbox: [29.905, -90.11, 29.975, -90.00], depth: 30, shelf: 120,
         inlets: [{ name: 'Mississippi', at: [29.92, -90.12], site: '07374000', gauge: 'at Baton Rouge, LA', typical: 450000 }],
-        outlets: [[29.93, -89.99]],
-        walls: [[29.98, -90.03]],
         labels: [{ text: 'Algiers Point', at: [29.9585, -90.0525] }] },
       { id: 'head-of-passes', name: 'Head of Passes', title: 'Head of Passes',
         sub: f => `${cfs(f.total)} cubic feet a second, split three ways into the Gulf`,
         bbox: [29.07, -89.40, 29.30, -89.10], depth: 15, shelf: 250,
-        inlets: [{ name: 'Mississippi', at: [29.31, -89.37], site: '07374525', gauge: 'at Belle Chasse, LA', typical: 450000 }],
-        outlets: [[29.0, -89.25], [29.15, -89.02], [29.32, -89.08], [29.1, -89.48]] },
+        inlets: [{ name: 'Mississippi', at: [29.31, -89.37], site: '07374525', gauge: 'at Belle Chasse, LA', typical: 450000 }] },
     ],
   },
 };
@@ -295,25 +293,59 @@ async function fetchTile(url) {
     const s = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
     buf = new Uint8Array(await new Response(s).arrayBuffer());
   }
-  return buf;
+  return decodeTile(buf);
+}
+
+// Panning back and forth asks for the same tiles again, so keep the recent ones
+const tileCache = new Map();
+let tileJSON = null;
+function cachedTile(url) {
+  if (!tileCache.has(url)) {
+    const p = fetchTile(url);
+    p.catch(() => tileCache.delete(url));
+    tileCache.set(url, p);
+    if (tileCache.size > 240) tileCache.delete(tileCache.keys().next().value);
+  }
+  return tileCache.get(url);
+}
+
+function lineStrings(geom) {
+  const lines = [], zz = n => (n >>> 1) ^ -(n & 1);
+  let x = 0, y = 0, i = 0, line = null;
+  while (i < geom.length) {
+    const cmd = geom[i++], id = cmd & 7, n = cmd >> 3;
+    if (id === 7) continue;
+    for (let k = 0; k < n; k++) {
+      x += zz(geom[i++]); y += zz(geom[i++]);
+      if (id === 1) lines.push(line = []);
+      line.push([x, y]);
+    }
+  }
+  return lines;
 }
 
 // ---- Model grid -----------------------------------------------------------
-function makeGrid(stop) {
-  const [s, w, n, e] = stop.bbox;
+function makeGrid(bbox) {
+  const [s, w, n, e] = bbox;
   const nw = L.CRS.EPSG3857.latLngToPoint(L.latLng(n, w), Z);
   const se = L.CRS.EPSG3857.latLngToPoint(L.latLng(s, e), Z);
   const cs = Math.max(se.x - nw.x, se.y - nw.y) / GRID_TARGET;   // cell size in zoom-14 pixels
   const W = Math.ceil((se.x - nw.x) / cs), H = Math.ceil((se.y - nw.y) / cs);
   const lat = (s + n) / 2;
   const cellM = cs * 156543.034 * Math.cos(lat * Math.PI / 180) / 2 ** Z;
-  return { ox: nw.x, oy: nw.y, cs, W, H, cellM,
+  return { bbox, ox: nw.x, oy: nw.y, cs, W, H, cellM,
     toGrid: ll => { const p = L.CRS.EPSG3857.latLngToPoint(L.latLng(ll), Z); return [(p.x - nw.x) / cs, (p.y - nw.y) / cs]; },
+    toLatLng: (x, y) => L.CRS.EPSG3857.pointToLatLng(L.point(nw.x + x * cs, nw.y + y * cs), Z),
     nwLatLng: L.CRS.EPSG3857.pointToLatLng(nw, Z) };
 }
 
-async function loadWaterMask(grid, progress) {
-  const tj = await fetchJSON(TILEJSON);
+// The water mask, plus the river centerlines in grid coordinates
+async function loadWater(grid, progress) {
+  if (!tileJSON) {
+    tileJSON = fetchJSON(TILEJSON);
+    tileJSON.catch(() => { tileJSON = null; });
+  }
+  const tj = await tileJSON;
   const template = tj.tiles && tj.tiles[0];
   if (!template) throw new Error('The tile server sent no tile URL');
   // Highest tile zoom (≤ 14) that covers the box in at most 40 tiles
@@ -328,33 +360,63 @@ async function loadWaterMask(grid, progress) {
   for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) jobs.push({ x, y });
   let done = 0;
   const tiles = await Promise.all(jobs.map(async j => {
-    const buf = await fetchTile(template.replace('{z}', tz).replace('{x}', j.x).replace('{y}', j.y));
+    const layers = await cachedTile(template.replace('{z}', tz).replace('{x}', j.x).replace('{y}', j.y));
     progress(`Loading water outlines… ${++done}/${jobs.length}`);
-    return { ...j, buf };
+    return { ...j, layers };
   }));
   const canvas = document.createElement('canvas');
   canvas.width = grid.W; canvas.height = grid.H;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.fillStyle = '#fff';
   const tileSize = 256 * 2 ** (Z - tz);
+  const waterways = [];
   let polygons = 0;
   for (const t of tiles) {
-    if (!t.buf) continue;
-    const water = decodeTile(t.buf).water;
-    if (!water) continue;
-    const s = tileSize / water.extent / grid.cs;
-    ctx.setTransform(s, 0, 0, s, (t.x * tileSize - grid.ox) / grid.cs, (t.y * tileSize - grid.oy) / grid.cs);
-    for (const feat of water.features) {
-      if (feat.type !== 3 || featureProps(water, feat).class === 'swimming_pool') continue;
-      ctx.beginPath(); tracePolygon(ctx, feat.geometry); ctx.fill('evenodd');
-      polygons++;
+    if (!t.layers) continue;
+    const { water, waterway } = t.layers;
+    if (water) {
+      const s = tileSize / water.extent / grid.cs;
+      ctx.setTransform(s, 0, 0, s, (t.x * tileSize - grid.ox) / grid.cs, (t.y * tileSize - grid.oy) / grid.cs);
+      for (const feat of water.features) {
+        if (feat.type !== 3 || featureProps(water, feat).class === 'swimming_pool') continue;
+        ctx.beginPath(); tracePolygon(ctx, feat.geometry); ctx.fill('evenodd');
+        polygons++;
+      }
+    }
+    if (waterway) {
+      const s = tileSize / waterway.extent / grid.cs;
+      const ox = (t.x * tileSize - grid.ox) / grid.cs, oy = (t.y * tileSize - grid.oy) / grid.cs;
+      for (const feat of waterway.features) {
+        const props = featureProps(waterway, feat);
+        if (feat.type !== 2 || props.class !== 'river' || !props.name) continue;
+        const lines = lineStrings(feat.geometry).map(l => l.map(([x, y]) => [ox + x * s, oy + y * s]));
+        waterways.push({ name: props.name, lines });
+      }
     }
   }
-  if (!polygons) throw new Error('No water found in the map tiles for this stop');
+  if (!polygons) throw new Error('No water found in the map tiles here');
   const px = ctx.getImageData(0, 0, grid.W, grid.H).data;
   const mask = new Uint8Array(grid.W * grid.H);
   for (let i = 0; i < mask.length; i++) mask[i] = px[i * 4 + 3] >= 128 ? 1 : 0;
-  return mask;
+  return { mask, waterways };
+}
+
+// Where each named river's centerline crosses the edge of the grid, and which way
+function edgeCrossings(grid, waterways) {
+  const { W, H } = grid, out = [];
+  const inside = ([x, y]) => x >= 0 && y >= 0 && x < W && y < H;
+  for (const w of waterways) for (const line of w.lines) for (let k = 1; k < line.length; k++) {
+    const a = line[k - 1], b = line[k], ia = inside(a);
+    if (ia === inside(b)) continue;
+    let p = a, q = b;
+    for (let s = 0; s < 24; s++) {
+      const m = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+      if (inside(m) === ia) p = m; else q = m;
+    }
+    const e = ia ? p : q;     // the end that's inside
+    out.push({ name: w.name, enters: !ia, x: Math.floor(e[0]), y: Math.floor(e[1]) });
+  }
+  return out;
 }
 
 // ---- Gauges ---------------------------------------------------------------
@@ -376,20 +438,26 @@ async function fetchGauge(site) {
   return null;
 }
 
+const gaugeCache = new Map();
+function gaugeFlow(inlet) {
+  if (!gaugeCache.has(inlet.site)) gaugeCache.set(inlet.site, fetchGauge(inlet.site));
+  return gaugeCache.get(inlet.site).then(g => ({ ...inlet, cfs: g ? g.cfs : inlet.typical, time: g && g.time, live: !!g }));
+}
+
 async function loadFlows(stop) {
-  const inlets = await Promise.all(stop.inlets.map(async inlet => {
-    const g = await fetchGauge(inlet.site);
-    return { ...inlet, cfs: g ? g.cfs : inlet.typical, time: g && g.time, live: !!g };
-  }));
+  const inlets = await Promise.all(stop.inlets.map(gaugeFlow));
   return { inlets, total: inlets.reduce((a, i) => a + i.cfs, 0) };
 }
+
+class NothingHere extends Error {}
+class Superseded extends Error {}
 
 // ---- Flow model -----------------------------------------------------------
 // Steady, depth-averaged flow where friction balances the water-surface slope
 // (Manning): unit discharge q = -K ∇η with K ∝ h^(5/3), and ∇·q = 0. Gauged
 // discharge enters at the inlets, the surface is held level at the outlets, and
 // banks are walls. Depth h is guessed from distance to shore.
-async function solveFlow(stop, grid, water, flows, progress) {
+async function solveFlow(stop, grid, { mask: water, waterways }, progress) {
   const { W, H } = grid, N = W * H;
   const at = (x, y) => y * W + x;
 
@@ -404,32 +472,48 @@ async function solveFlow(stop, grid, water, flows, progress) {
   for (const [x, y, side] of perim) {
     if (water[at(x, y)]) { if (!run) runs.push(run = []); run.push({ i: at(x, y), x, y, side }); } else run = null;
   }
-  const points = [
-    ...stop.inlets.map((p, k) => ({ kind: 'in', k, g: grid.toGrid(p.at) })),
-    ...(stop.outlets || []).map(p => ({ kind: 'out', g: grid.toGrid(p) })),
-    ...(stop.walls || []).map(p => ({ kind: 'wall', g: grid.toGrid(p) })),
-  ];
-  const inletRun = stop.inlets.map(() => null);
-  const outletRuns = [];
-  for (const r of runs) {
-    let best = null, bestD = Infinity;
-    for (const p of points) for (const c of r) {
-      const d = (c.x - p.g[0]) ** 2 + (c.y - p.g[1]) ** 2;
-      if (d < bestD) { bestD = d; best = p; }
-    }
-    r.d = bestD;
-    if (best.kind === 'out') outletRuns.push(r);
-    else if (best.kind === 'in' && (!inletRun[best.k] || r.d < inletRun[best.k].d)) inletRun[best.k] = r;
+  // The perimeter is a loop: join a run that wraps past the start onto the last one
+  if (runs.length > 1 && water[0] && water[at(0, 1)]) {
+    runs[0].unshift(...runs.pop());
   }
-  stop.inlets.forEach((p, k) => {
-    if (!inletRun[k]) throw new Error(`Couldn't find where the ${p.name} enters the map`);
-  });
-  if (!outletRuns.length) throw new Error('Couldn\'t find where the river leaves the map');
+
+  // Classify runs by the river centerlines crossing them, matched to the nearest gauge by name
+  const gauges = Object.values(RIVERS).flatMap(r => r.stops.flatMap(s => s.inlets));
+  const near = 6 + 3 * W / GRID_TARGET;     // cells between a centerline crossing and its water
+  for (const c of edgeCrossings(grid, waterways)) {
+    let best = null, bestD = near * near;
+    for (const r of runs) for (const e of r) {
+      const d = (e.x - c.x) ** 2 + (e.y - c.y) ** 2;
+      if (d < bestD) { bestD = d; best = r; }
+    }
+    if (!best) continue;
+    if (!c.enters) { best.out = true; continue; }
+    const name = c.name.toLowerCase(), ll = grid.toLatLng(c.x, c.y);
+    let gauge = null, gd = Infinity;
+    for (const g of gauges) {
+      if (!name.includes(g.name.toLowerCase())) continue;
+      const d = ll.distanceTo(g.at);
+      if (d < gd) { gd = d; gauge = g; }
+    }
+    if (gauge && !best.gauge) best.gauge = gauge;
+  }
+  // A river can leave the box and come back, entering twice with the same water. Runs
+  // fed by one gauge that lie within 2 km of each other share it; farther apart, each
+  // gets all of it.
+  const inlets = [];
+  for (const r of runs) if (r.gauge) {
+    const mid = r[r.length >> 1];
+    const group = inlets.find(g => g.gauge === r.gauge &&
+      g.runs.some(o => Math.hypot(o[o.length >> 1].x - mid.x, o[o.length >> 1].y - mid.y) * grid.cellM < 2000));
+    if (group) group.runs.push(r); else inlets.push({ gauge: r.gauge, runs: [r] });
+  }
+  if (!inlets.length) throw new NothingHere('No gauged river flows into this part of the map');
+  const flows = await Promise.all(inlets.map(g => gaugeFlow(g.gauge)));
 
   // Keep only water connected to an inlet
   const active = new Uint8Array(N);
   const stack = [];
-  for (const r of inletRun) for (const c of r) { active[c.i] = 1; stack.push(c.i); }
+  for (const g of inlets) for (const r of g.runs) for (const c of r) { active[c.i] = 1; stack.push(c.i); }
   while (stack.length) {
     const i = stack.pop(), x = i % W, y = (i - x) / W;
     for (const [nx, ny] of [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]]) {
@@ -438,10 +522,15 @@ async function solveFlow(stop, grid, water, flows, progress) {
       if (water[j] && !active[j]) { active[j] = 1; stack.push(j); }
     }
   }
+  // Outlets: where a river centerline leaves. Failing that (the open Gulf, or a
+  // centerline that doesn't reach the edge), any other water edge the inflow reaches.
+  const reached = runs.filter(r => !r.gauge && active[r[0].i]);
+  let outletRuns = reached.filter(r => r.out);
+  if (!outletRuns.length) outletRuns = reached;
+  if (!outletRuns.length) throw new NothingHere('Couldn\'t find where the river leaves the map');
   const fixed = new Uint8Array(N);      // outlet cells, η = 0
   const borderSide = new Int8Array(N).fill(-1);
   for (const r of outletRuns) for (const c of r) if (active[c.i]) { fixed[c.i] = 1; borderSide[c.i] = c.side; }
-  if (!fixed.some(v => v)) throw new Error('The water here doesn\'t connect from inlet to outlet in the map data');
 
   // Depth from distance to shore (two-pass chamfer distance transform)
   const dist = new Float32Array(N);
@@ -470,8 +559,8 @@ async function solveFlow(stop, grid, water, flows, progress) {
 
   // Sources: each inlet's discharge (m³/s), shared across its edge cells by conveyance
   const source = new Float32Array(N);
-  flows.inlets.forEach((f, k) => {
-    const cells = inletRun[k].filter(c => active[c.i]);
+  flows.forEach((f, k) => {
+    const cells = inlets[k].runs.flat().filter(c => active[c.i]);
     const sumK = cells.reduce((a, c) => a + K[c.i], 0);
     for (const c of cells) { source[c.i] += f.cfs * CFS * K[c.i] / sumK; borderSide[c.i] = c.side; }
   });
@@ -561,8 +650,9 @@ async function solveFlow(stop, grid, water, flows, progress) {
   for (let i = 0; i < N; i++) if (active[i]) speeds.push(speed[i]);
   speeds.sort((a, c) => a - c);
 
-  return { grid, active, depth, u, v, speed, it, rel, cellsN: speeds.length, inletRun, flows,
-    inflow: flows.total * CFS, outflow,
+  const total = flows.reduce((a, f) => a + f.cfs, 0);
+  return { grid, active, depth, u, v, speed, it, rel, cellsN: speeds.length, inlets, flows,
+    inflow: total * CFS, outflow,
     p95: speeds[Math.floor(speeds.length * 0.95)] || 0, max: speeds[speeds.length - 1] || 0 };
 }
 
@@ -581,24 +671,22 @@ function heatImage(model) {
   return c;
 }
 
+// Recent models, so panning back or returning to a stop is instant
 const modelCache = new Map();
-function getModel(stop, progress) {
-  if (!modelCache.has(stop.id)) {
-    const p = (async () => {
-      const grid = makeGrid(stop);
-      const [water, flows] = await Promise.all([loadWaterMask(grid, progress), loadFlows(stop)]);
-      const model = await solveFlow(stop, grid, water, flows, progress);
-      model.heat = heatImage(model);
-      model.spawn = [];
-      for (let i = 0; i < model.active.length; i++) if (model.active[i]) model.spawn.push(i);
-      // Time-lapse so typical fast water crosses about a third of a cell per frame
-      model.timelapse = model.p95 > 0 ? (0.35 * grid.cellM * 60) / model.p95 : 600;
-      return model;
-    })();
-    p.catch(() => modelCache.delete(stop.id));
-    modelCache.set(stop.id, p);
-  }
-  return modelCache.get(stop.id);
+async function buildModel(stop, bbox, progress) {
+  const key = stop.id + ' ' + bbox.map(v => v.toFixed(4)).join(',');
+  if (modelCache.has(key)) return modelCache.get(key);
+  const grid = makeGrid(bbox);
+  const model = await solveFlow(stop, grid, await loadWater(grid, progress), progress);
+  model.stop = stop;
+  model.heat = heatImage(model);
+  model.spawn = [];
+  for (let i = 0; i < model.active.length; i++) if (model.active[i]) model.spawn.push(i);
+  // Time-lapse so typical fast water crosses about a third of a cell per frame
+  model.timelapse = model.p95 > 0 ? (0.35 * grid.cellM * 60) / model.p95 : 600;
+  modelCache.set(key, model);
+  if (modelCache.size > 6) modelCache.delete(modelCache.keys().next().value);
+  return model;
 }
 
 // ---- Map and animation ----------------------------------------------------
@@ -616,7 +704,7 @@ for (const c of [heatCanvas, trailCanvas]) { c.className = 'flow-canvas'; map.ge
 const heatCtx = heatCanvas.getContext('2d'), trailCtx = trailCanvas.getContext('2d');
 let dpr = 1, cw = 0, ch = 0;
 
-const state = { river: null, stop: null, model: null, playing: true, hidden: false, particles: null, last: 0 };
+const state = { river: null, stop: null, model: null, building: null, playing: true, hidden: false, particles: null, last: 0 };
 
 function resize() {
   dpr = window.devicePixelRatio || 1;
@@ -647,6 +735,79 @@ function redraw() {
 map.on('move', redraw);
 map.on('zoomstart', () => { state.hidden = true; redraw(); });
 map.on('zoomend', () => { state.hidden = false; redraw(); });
+
+// ---- Following the view -----------------------------------------------------
+// The model covers the visible map plus a margin. When panning leaves that margin,
+// or zooming in makes its cells coarse, model the new view once the map settles.
+function viewBox() {
+  const b = map.getBounds().pad(VIEW_PAD);
+  return [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()];
+}
+
+function covers(grid) {
+  if (!grid) return false;
+  const [s, w, n, e] = grid.bbox, b = map.getBounds();
+  const cellPx = grid.cs * 2 ** (map.getZoom() - Z);
+  return b.getSouth() >= s && b.getWest() >= w && b.getNorth() <= n && b.getEast() <= e && cellPx <= MAX_CELL_PX;
+}
+
+function spanKm([s, w, n, e]) {
+  return Math.max(L.latLng(s, w).distanceTo([s, e]), L.latLng(s, w).distanceTo([n, w])) / 1000;
+}
+
+let followTimer = 0, run = 0, noteTimer = 0;
+map.on('movestart', () => clearTimeout(followTimer));
+map.on('moveend', () => { clearTimeout(followTimer); followTimer = setTimeout(follow, 350); });
+
+function note(text) {
+  clearTimeout(noteTimer);
+  busy(text);
+  noteTimer = setTimeout(() => { if ($('busy').textContent === text) busy(''); }, 2500);
+}
+
+async function follow() {
+  const stop = state.stop;
+  if (!stop || covers(state.building) || (!state.building && state.model && covers(state.model.grid))) return;
+  const bbox = viewBox();
+  if (spanKm(bbox) > MAX_SPAN_KM) { state.building = null; ++run; note('Zoom in to model the flow here'); return; }
+  const me = ++run;
+  state.building = makeGrid(bbox);
+  clearTimeout(noteTimer);
+  busy(state.model ? 'Modeling this view…' : 'Loading…');
+  try {
+    const m = await buildModel(stop, bbox, msg => { if (me !== run) throw new Superseded(); busy(msg); });
+    if (me !== run) return;
+    state.building = null;
+    busy('');
+    useModel(m);
+  } catch (err) {
+    if (me !== run || err instanceof Superseded) return;
+    state.building = null;
+    busy('');
+    if (state.model && err instanceof NothingHere) { note(err.message); return; }
+    if (state.model) { note(`Couldn't model this view: ${err.message}`); return; }
+    console.error(err);
+    $('error').textContent = `Couldn't model ${stop.title}: ${err.message}`;
+  }
+}
+
+function useModel(m) {
+  state.model = m;
+  initParticles(m);
+  redraw();
+  labelLayer.clearLayers();
+  for (const l of m.stop.labels || []) addLabel(l.at, l.text);
+  const names = new Set(m.inlets.map(g => g.gauge.name));
+  if (names.size > 1) {
+    const done = new Set();
+    for (const g of m.inlets) {
+      if (done.has(g.gauge.name)) continue;
+      const at = inletLabelAt(m, g.runs[0]);
+      if (at) { addLabel(at, g.gauge.name); done.add(g.gauge.name); }
+    }
+  }
+  renderDetails(m);
+}
 
 function spawn(m, P, j) {
   const i = m.spawn[(Math.random() * m.spawn.length) | 0], x = i % m.grid.W;
@@ -743,8 +904,9 @@ function go(stop) {
   show(stop);
 }
 
-async function show(stop) {
-  state.stop = stop; state.model = null; state.particles = null;
+function show(stop) {
+  state.stop = stop; state.model = null; state.building = null; state.particles = null;
+  ++run;
   redraw(); labelLayer.clearLayers(); map.closePopup();
   $('error').textContent = ''; $('details').innerHTML = '';
   $('river-title').textContent = RIVERS[state.river].title;
@@ -752,24 +914,9 @@ async function show(stop) {
   renderStops();
   const [s, w, n, e] = stop.bbox;
   map.fitBounds([[s, w], [n, e]], { animate: false });
-  busy('Loading…');
-  try {
-    const m = await getModel(stop, msg => { if (state.stop === stop) busy(msg); });
-    if (state.stop !== stop) return;
-    state.model = m;
-    initParticles(m);
-    redraw();
-    $('cap-sub').textContent = stop.sub(m.flows);
-    for (const l of stop.labels || []) addLabel(l.at, l.text);
-    if (stop.inlets.length > 1) m.inletRun.forEach((r, k) => addLabel(inletLabelAt(m, r), stop.inlets[k].name));
-    renderDetails(stop, m);
-  } catch (err) {
-    if (state.stop !== stop) return;
-    console.error(err);
-    $('error').textContent = `Couldn't model ${stop.title}: ${err.message}`;
-  } finally {
-    if (state.stop === stop) busy('');
-  }
+  clearTimeout(followTimer);
+  loadFlows(stop).then(f => { if (state.stop === stop) $('cap-sub').textContent = stop.sub(f); });
+  follow();
 }
 
 function addLabel(at, text) {
@@ -777,23 +924,25 @@ function addLabel(at, text) {
   L.marker(at, { icon: L.divIcon({ html: el, className: '', iconSize: null }), interactive: false }).addTo(labelLayer);
 }
 
-// Put an inlet's name a little way into the map from where it crosses the edge
+// Put an inlet's name on its water, a little way inside the visible map
 function inletLabelAt(m, run) {
-  const { W, H, cs } = m.grid, c = run[Math.floor(run.length / 2)];
+  const { W, H } = m.grid, c = run[Math.floor(run.length / 2)];
   const [dx, dy] = [[0, 1], [-1, 0], [0, -1], [1, 0]][c.side];
+  const b = map.getBounds(), [x0, y0] = m.grid.toGrid(b.getNorthWest()), [x1, y1] = m.grid.toGrid(b.getSouthEast());
+  const ix = (x1 - x0) * 0.1, iy = (y1 - y0) * 0.1;
   let x = c.x, y = c.y;
-  const steps = Math.round(Math.min(W, H) * 0.12);
-  for (let s = 0; s < steps; s++) {
+  for (let s = 0; s < W + H; s++) {
+    if (x > x0 + ix && x < x1 - ix && y > y0 + iy && y < y1 - iy) return m.grid.toLatLng(x + 0.5, y + 0.5);
     const nx = x + dx, ny = y + dy;
-    if (nx < 0 || ny < 0 || nx >= W || ny >= H || !m.active[ny * W + nx]) break;
+    if (nx < 0 || ny < 0 || nx >= W || ny >= H || !m.active[ny * W + nx]) return null;
     x = nx; y = ny;
   }
-  return L.CRS.EPSG3857.pointToLatLng(L.point(m.grid.ox + (x + 0.5) * cs, m.grid.oy + (y + 0.5) * cs), Z);
+  return null;
 }
 
-function renderDetails(stop, m) {
+function renderDetails(m) {
   const fmtTime = t => t ? new Date(t).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '';
-  const gauges = m.flows.inlets.map(f => {
+  const gauges = [...new Map(m.flows.map(f => [f.site, f])).values()].map(f => {
     const link = `<a href="https://waterdata.usgs.gov/monitoring-location/USGS-${f.site}/" target="_blank" rel="noopener">${f.name} ${f.gauge}</a>`;
     return f.live ? `${link}: ${cfs(f.cfs)} ft³/s at ${fmtTime(f.time)}`
       : `${link}: gauge unavailable, using a typical ${cfs(f.cfs)} ft³/s`;
@@ -819,7 +968,7 @@ document.addEventListener('keydown', e => {
 });
 window.addEventListener('hashchange', () => { const h = readHash(); state.river = h.river; if (h.stop !== state.stop) show(h.stop); });
 
-window.riverFlow = { state, getModel, RIVERS };
+window.riverFlow = { state, map, RIVERS };
 drawLegend();
 { const h = readHash(); state.river = h.river; resize(); show(h.stop); }
 </script>
