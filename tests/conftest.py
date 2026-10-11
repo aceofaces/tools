@@ -1,4 +1,5 @@
 import functools
+import mimetypes
 import http.server
 import os
 import threading
@@ -38,7 +39,7 @@ def page(page):
         path = route.request.url.split("/npm/", 1)[-1].split("?")[0]
         local = CDN_CACHE / path
         if local.is_file():
-            route.fulfill(path=str(local), content_type="application/javascript")
+            route.fulfill(path=str(local), content_type=mimetypes.guess_type(local.name)[0] or "application/javascript")
         else:
             route.continue_()
 
